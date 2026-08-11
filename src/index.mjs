@@ -12,7 +12,7 @@ import {
   ensureProjectOpen, switchChat, openScreen, setWindowVisible,
   screenshotScreen, searchFiles, isTextual, listTemplates, createProject,
   createProjectRpc, setProjectDesignSystems, writeFiles, stripInjected,
-  chooseRepository, uploadFig,
+  chooseRepository, uploadFig, linkLocalCode,
   DESIGN_SYSTEM, PLAIN_PROJECT,
 } from './session.mjs'
 
@@ -172,6 +172,31 @@ server.registerTool(
   async ({ projectId, repo, visible }) => {
     const r = await chooseRepository(projectId, repo, { visible })
     return text(`${projectId} now designs against repository: ${r.repo}`)
+  }
+)
+
+server.registerTool(
+  'link_local_code',
+  {
+    title: 'Attach a local folder as the codebase',
+    description:
+      'Attach a folder from this machine to a Claude Design project, so it designs against your real code. ' +
+      'Sends text files only, skipping .git, node_modules and build output, bounded by file count and total size. ' +
+      'Point it at the frontend or design-system folder rather than a whole monorepo.',
+    inputSchema: {
+      projectId: z.string(),
+      dir: z.string().describe('Local directory path'),
+      maxFiles: z.number().int().min(1).max(5000).default(1200),
+      maxBytes: z.number().int().min(1024).max(40000000).default(6291456),
+      visible: z.boolean().default(true),
+    },
+  },
+  async ({ projectId, dir, maxFiles, maxBytes, visible }) => {
+    const r = await linkLocalCode(projectId, dir, { visible, maxFiles, maxBytes })
+    return text(
+      `Attached ${r.root}\n${r.files} file(s), ${Math.round(r.bytes / 1024)} KB` +
+      (r.skipped.length ? `\nSkipped: ${r.skipped.join(', ')}` : '')
+    )
   }
 )
 

@@ -16,7 +16,7 @@
 
 import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // Portable: use whatever playwright the package resolves to. On Marvin's Mac a
@@ -770,6 +770,127 @@ export async function chooseRepository (projectId, repo, { visible = true } = {}
   await dlg.getByRole('button', { name: /continue/i }).first().click({ timeout: 10000 })
   await p.waitForTimeout(2500)
   return { repo: chosen }
+}
+
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage', '.venv', '__pycache__'])
+
+/** Read a directory into a nested {dirs, files} tree, bounded so a big repo cannot blow up the page. */
+async function readTree (root, { maxFiles = 1200, maxBytes = 6 * 1024 * 1024 } = {}) {
+  const { readdir, readFile, stat } = await import('node:fs/promises')
+  let files = 0
+  let bytes = 0
+  const skipped = []
+
+  const walk = async (dir) => {
+    const node = { dirs: {}, files: {} }
+    let entries = []
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return node
+    }
+    for (const e of entries) {
+      if (e.name.startsWith('.') && e.name !== '.gitignore') continue
+      const full = join(dir, e.name)
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name)) { skipped.push(`${e.name}/`); continue }
+        node.dirs[e.name] = await walk(full)
+      } else if (e.isFile()) {
+        if (files >= maxFiles || bytes >= maxBytes) { skipped.push(e.name); continue }
+        const s = await stat(full).catch(() => null)
+        if (!s || s.size > 512 * 1024) { skipped.push(e.name); continue }
+        if (!isTextual(e.name)) { skipped.push(e.name); continue }
+        node.files[e.name] = await readFile(full, 'utf8').catch(() => '')
+        files++
+        bytes += s.size
+      }
+    }
+    return node
+  }
+
+  return { tree: await walk(root), files, bytes, skipped }
+}
+
+/**
+ * Attach a local folder as the project's codebase.
+ *
+ * The dialog's "browse…" calls `window.showDirectoryPicker()`, a native OS
+ * dialog no automation can drive, and there is no file input to fall back on.
+ * So the picker is replaced with one that resolves to a synthetic
+ * FileSystemDirectoryHandle built from a tree read here in Node.
+ *
+ * The handle is given the real prototype so any `instanceof` check still
+ * passes, while our own methods shadow the native ones (which would throw on a
+ * foreign object). Only text files are sent, bounded by count and total bytes.
+ */
+export async function linkLocalCode (projectId, dir, { visible = true, maxFiles, maxBytes } = {}) {
+  const root = resolve(dir)
+  const { tree, files, bytes, skipped } = await readTree(root, { maxFiles, maxBytes })
+  if (!files) throw new Error(`No text files found under ${root}`)
+
+  const p = await ensureProjectOpen(projectId, { visible })
+  await openImportItem(p, 'Link local code')
+
+  const dlg = p.locator('[role="dialog"]').last()
+  await dlg.waitFor({ state: 'visible', timeout: 15000 })
+
+  await p.evaluate(
+    ([name, node]) => {
+      const mkFile = (fname, content) => {
+        const h = {
+          kind: 'file',
+          name: fname,
+          isSameEntry: async (o) => o === h,
+          queryPermission: async () => 'granted',
+          requestPermission: async () => 'granted',
+          getFile: async () => new File([content], fname, { lastModified: 0 }),
+        }
+        if (window.FileSystemFileHandle) Object.setPrototypeOf(h, window.FileSystemFileHandle.prototype)
+        return h
+      }
+      const mkDir = (dname, n) => {
+        const h = {
+          kind: 'directory',
+          name: dname,
+          isSameEntry: async (o) => o === h,
+          queryPermission: async () => 'granted',
+          requestPermission: async () => 'granted',
+          resolve: async () => null,
+          getFileHandle: async (k) => {
+            if (k in n.files) return mkFile(k, n.files[k])
+            throw new DOMException(`${k} not found`, 'NotFoundError')
+          },
+          getDirectoryHandle: async (k) => {
+            if (k in n.dirs) return mkDir(k, n.dirs[k])
+            throw new DOMException(`${k} not found`, 'NotFoundError')
+          },
+          async * entries () {
+            for (const k of Object.keys(n.files)) yield [k, mkFile(k, n.files[k])]
+            for (const k of Object.keys(n.dirs)) yield [k, mkDir(k, n.dirs[k])]
+          },
+          async * keys () { for await (const [k] of h.entries()) yield k },
+          async * values () { for await (const [, v] of h.entries()) yield v },
+          [Symbol.asyncIterator] () { return h.entries() },
+        }
+        if (window.FileSystemDirectoryHandle) Object.setPrototypeOf(h, window.FileSystemDirectoryHandle.prototype)
+        return h
+      }
+      window.__cdHandle = mkDir(name, node)
+      window.showDirectoryPicker = async () => window.__cdHandle
+    },
+    [root.split('/').pop() || 'project', tree]
+  )
+
+  await dlg.locator('button, [role="button"]').filter({ hasText: /browse/i }).first().click({ timeout: 10000 })
+  await p.waitForTimeout(3000)
+
+  const attach = dlg.locator('button').filter({ hasText: /^attach$/i }).first()
+  if (await attach.count().catch(() => 0)) {
+    await attach.click({ timeout: 15000 }).catch(() => {})
+    await p.waitForTimeout(3000)
+  }
+
+  return { root, files, bytes, skipped: [...new Set(skipped)].slice(0, 20) }
 }
 
 /** Push a .fig file in through the import menu. */

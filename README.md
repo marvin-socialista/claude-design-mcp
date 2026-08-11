@@ -63,6 +63,9 @@ claude mcp add claude-design --scope user -- node "$PWD/src/index.mjs"
 | `create_project` | The "What should we create?" box: a prompt, an optional template, and it starts building |
 | `create_design_system` | An empty design-system project. Type is fixed at creation, so it cannot be converted later |
 | `link_design_systems` | Attach design systems to a project so its chats design against them |
+| `link_local_code` | Attach a local folder as the project's codebase, so it designs against your real code |
+| `choose_repository` | Point a project at a connected GitHub repository |
+| `upload_fig` | Push a Figma `.fig` file in from disk |
 
 **Talk to it**
 
@@ -94,6 +97,31 @@ claude mcp add claude-design --scope user -- node "$PWD/src/index.mjs"
 
 The plugin also ships a `claude-design` skill that teaches Claude when and how
 to reach for these, so you can just say what you want.
+
+### Attaching a local folder, without a native file dialog
+
+"Link local code" has no file input. Its **browse…** calls
+`window.showDirectoryPicker()`, a native OS dialog that no automation can drive,
+which normally ends the story.
+
+So the picker is replaced. `link_local_code` reads the folder in Node, then
+injects a synthetic `FileSystemDirectoryHandle` implementing the parts the app
+uses (`values`, `entries`, `getFileHandle`, `getDirectoryHandle`,
+`queryPermission`) and overrides `showDirectoryPicker` to return it. The handle
+is given the real prototype via `Object.setPrototypeOf`, so an `instanceof`
+check still passes while our own methods shadow the native ones, which would
+throw on a foreign object.
+
+Verified end to end: after attaching `src/`, Claude Design listed all five
+files and quoted the first line of `session.mjs` correctly.
+
+Text files only, skipping `.git`, `node_modules` and build output, bounded by
+file count and total bytes. Point it at a frontend or design-system folder
+rather than a monorepo.
+
+**The handle is synthetic and lives in the page.** A real one is persisted and
+re-permissioned across sessions; this one is not, so re-attach if a later
+session needs the files again.
 
 ### Seeing the work, not just hearing about it
 

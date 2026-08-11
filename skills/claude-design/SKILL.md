@@ -47,6 +47,20 @@ call `switch_chat` first.
 - `link_design_systems` attaches design systems to a project. It replaces the
   set, so pass everything you want to keep.
 
+## Giving it your real code and context
+
+- `link_local_code` attaches a local folder as the codebase. Point it at the
+  frontend or design-system folder, not a monorepo: it sends text files only,
+  bounded by count and size. The underlying handle is synthetic and lives in
+  the browser page, so re-attach in a later session rather than assuming it
+  persisted.
+- `choose_repository` points the project at a connected GitHub repo. If GitHub
+  is not connected it will say so; do not try to complete an OAuth grant.
+- `upload_fig` pushes a `.fig` file from disk.
+- To reference another project, pass `referenceProjectIds` to `send_prompt`.
+  There is no menu action for this: the app reads project URLs out of the
+  prompt text, which is what that parameter appends.
+
 ## Close the loop: look at the work
 
 Do not take the designer's word for it. After `send_prompt`:
