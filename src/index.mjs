@@ -8,7 +8,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import {
   listProjects, getProjectData, listFiles, filePaths, getFile,
-  chatsOf, pickChat, submitPrompt, waitForIdle, closeSession,
+  chatsOf, pickChat, submitPrompt, waitForReply, closeSession,
   ensureProjectOpen, switchChat, openScreen, setWindowVisible,
 } from './session.mjs'
 
@@ -116,7 +116,7 @@ server.registerTool(
       chatId: z.string().optional().describe('Chat to post into. Defaults to whichever is already active.'),
       visible: z.boolean().default(true).describe('Show the browser window so the user can watch it work'),
       wait: z.boolean().default(true).describe('Wait for it to finish. false returns as soon as the prompt is sent.'),
-      idleSeconds: z.number().int().min(2).max(120).default(8).describe('Quiet period that counts as finished'),
+      idleSeconds: z.number().int().min(2).max(300).default(15).describe('Network-quiet period before checking for a reply. Raise it for jobs with long tool calls.'),
       timeoutSeconds: z.number().int().min(30).max(3600).default(900).describe('Give up waiting after this long'),
       maxChars: z.number().int().min(200).max(50000).default(6000).describe('Per-message clip length'),
     },
@@ -137,7 +137,10 @@ server.registerTool(
       return text(`Sent to project ${projectId}. Not waiting.\nUse read_chat to see the reply once it lands.`)
     }
 
-    const result = await waitForIdle({
+    const result = await waitForReply({
+      projectId,
+      chatId: preChat?.id,
+      sinceCount: preCount,
       before,
       idleMs: idleSeconds * 1000,
       timeoutMs: timeoutSeconds * 1000,
@@ -146,13 +149,13 @@ server.registerTool(
     if (result.neverStarted) {
       return text(
         'The prompt was typed but no Chat request ever started, so it probably did not send.\n' +
-        'Run with CLAUDE_DESIGN_HEADED=1 to watch the window, and check the composer.'
+        'Run with CLAUDE_DESIGN_VISIBLE=1 to watch the window, and check the composer.'
       )
     }
 
-    const post = await getProjectData(projectId)
-    const postChat = pickChat(post, preChat?.id)
-    const fresh = (postChat?.messages || []).slice(preCount)
+    const post = result.data
+    const postChat = result.chat
+    const fresh = result.fresh
 
     // Entries carry no version or mtime, so only appearances and deletions are
     // detectable. Edits to an existing file do not show up here; the reply text
@@ -163,9 +166,14 @@ server.registerTool(
     const list = (label, xs) =>
       xs.length ? `${label} (${xs.length}): ${xs.slice(0, 40).join(', ')}${xs.length > 40 ? ' …' : ''}\n` : ''
 
+    const replied = fresh.some((m) => m.role === 'assistant' && String(m.content ?? '').trim())
     const head =
       `Project "${post.name}" / chat ${postChat?.id}\n` +
-      `${result.streams} model turn(s)${result.timedOut ? ', TIMED OUT waiting for idle' : ''}\n` +
+      `${result.streams} model turn(s)\n` +
+      (result.timedOut && !replied
+        ? 'TIMED OUT: no assistant reply landed. It may still be running in the browser. ' +
+          'Do not close it, and check again with read_chat.\n'
+        : '') +
       list('Files added', added) +
       list('Files removed', removed) +
       (added.length || removed.length ? '' : 'No files added or removed (in-place edits are not detectable).\n')

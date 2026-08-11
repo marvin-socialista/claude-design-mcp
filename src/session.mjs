@@ -440,6 +440,59 @@ export async function chatStreamCount () {
  * browser runs it, the next stream carries the result. So completion is not
  * "a stream ended" but "no stream has ended for a while".
  */
+/**
+ * Wait for a real answer, not just for the network to go quiet.
+ *
+ * Stream-quiet alone is not enough: a long tool call is silent, so a turn can
+ * look finished mid-flight. The decisive signal is an assistant message with
+ * content landing in the transcript, so both are required. The transcript RPC
+ * is heavy, so it is only polled once things have already gone quiet.
+ */
+export async function waitForReply ({ projectId, chatId, sinceCount, before = 0, idleMs = 10000, timeoutMs = 900000 }) {
+  const p = await getPage()
+  const started = Date.now()
+  let sawStream = false
+  let streams = 0
+  let lastEnd = 0
+  let lastPoll = 0
+
+  const snapshot = async () => {
+    const data = await getProjectData(projectId)
+    const chat = pickChat(data, chatId)
+    const fresh = (chat?.messages || []).slice(sinceCount)
+    return { data, chat, fresh }
+  }
+
+  for (;;) {
+    const s = await p.evaluate(() => {
+      const e = window.__cdBridge?.chatEnds ?? []
+      return { count: e.length, last: e.length ? e[e.length - 1] : 0 }
+    })
+    if (s.count > before) {
+      sawStream = true
+      streams = s.count - before
+      lastEnd = s.last
+    }
+
+    const quiet = sawStream && lastEnd && Date.now() - lastEnd >= idleMs
+    if (quiet && Date.now() - lastPoll > 5000) {
+      lastPoll = Date.now()
+      const snap = await snapshot()
+      if (snap.fresh.some((m) => m.role === 'assistant' && String(m.content ?? '').trim())) {
+        return { ...snap, streams, timedOut: false }
+      }
+    }
+
+    if (!sawStream && Date.now() - started > 45000) {
+      return { ...(await snapshot()), streams: 0, timedOut: true, neverStarted: true }
+    }
+    if (Date.now() - started > timeoutMs) {
+      return { ...(await snapshot()), streams, timedOut: true }
+    }
+    await p.waitForTimeout(2000)
+  }
+}
+
 export async function waitForIdle ({ before = 0, idleMs = 6000, timeoutMs = 600000 } = {}) {
   const p = await getPage()
   const started = Date.now()
