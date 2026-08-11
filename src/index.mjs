@@ -146,9 +146,11 @@ server.registerTool(
     },
   },
   async ({ projectId, designSystemIds }) => {
-    await setProjectDesignSystems(projectId, designSystemIds)
-    return text(designSystemIds.length
-      ? `Attached ${designSystemIds.length} design system(s) to ${projectId}.`
+    const r = await setProjectDesignSystems(projectId, designSystemIds)
+    const all = await listProjects()
+    const name = (id) => all.find((p) => p.projectId === id)?.name || id
+    return text(r.designSystems.length
+      ? `${projectId} now designs against:\n${r.designSystems.map((id) => `- ${name(id)}  (${id})`).join('\n')}`
       : `Detached all design systems from ${projectId}.`)
   }
 )

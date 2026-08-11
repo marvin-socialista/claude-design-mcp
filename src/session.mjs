@@ -377,13 +377,30 @@ export async function createProjectRpc (name, { type = DESIGN_SYSTEM } = {}) {
   return { projectId: r.projectId, name, type }
 }
 
-/** Attach design systems to a project, so its chats design against them. */
+export const getProject = (projectId) => rpc('GetProject', { projectId })
+
+/** Which design systems a project currently designs against. */
+export async function getProjectDesignSystems (projectId) {
+  const r = await getProject(projectId)
+  return (r.designSystems || []).map((d) => d.dsProjectId)
+}
+
+/**
+ * Attach design systems to a project. Replaces the set, so pass everything you
+ * want kept. New projects come with the account's default already attached.
+ *
+ * Read back rather than trusting the 200: this API has a habit of accepting a
+ * malformed write and doing nothing.
+ */
 export async function setProjectDesignSystems (projectId, dsProjectIds) {
   await rpc('UpdateProjectDesignSystems', {
     projectId,
     designSystems: dsProjectIds.map((dsProjectId) => ({ dsProjectId, syncedAtVersion: '0' })),
   })
-  return { projectId, designSystems: dsProjectIds }
+  const now = await getProjectDesignSystems(projectId)
+  const missing = dsProjectIds.filter((id) => !now.includes(id))
+  if (missing.length) throw new Error(`UpdateProjectDesignSystems reported success but did not attach: ${missing.join(', ')}`)
+  return { projectId, designSystems: now }
 }
 
 /**
@@ -507,6 +524,7 @@ const SEL = {
   homeComposer: '[data-testid="home-composer-input"]',
   homeSend: '[data-testid="home-composer-send"]',
   dsPicker: '[data-testid="composer-ds-picker-trigger"]',
+  importButton: '[data-testid="composer-import-button"]',
 }
 
 export const DESIGN_SYSTEM = 'PROJECT_TYPE_DESIGN_SYSTEM'
@@ -649,19 +667,29 @@ export async function openScreen (projectId, path, { visible = true } = {}) {
 export async function attachFiles (p, files) {
   if (!files?.length) return null
 
+  // No file input is mounted up front, and the import button opens a menu
+  // (Attach file / Reference another project / Choose a repository / ...)
+  // rather than a picker, so the chooser only appears after that row is hit.
   const input = p.locator('input[type="file"]').first()
   if (await input.count().catch(() => 0)) {
     await input.setInputFiles(files)
   } else {
+    await p.locator(SEL.importButton).first().click({ timeout: 15000 })
+    const row = p
+      .locator('[role="menu"] button:visible, .om-menu-item-btn:visible')
+      .filter({ hasText: /attach file/i })
+      .first()
+    await row.waitFor({ state: 'visible', timeout: 15000 })
+
     const [chooser] = await Promise.all([
-      p.waitForEvent('filechooser', { timeout: 15000 }),
-      p.locator('[data-testid="composer-import-button"]').first().click({ timeout: 15000 }),
+      p.waitForEvent('filechooser', { timeout: 20000 }),
+      row.click({ timeout: 10000 }),
     ])
     await chooser.setFiles(files)
   }
 
   // Uploads must finish before the send button will take them.
-  await p.waitForTimeout(1500)
+  await p.waitForTimeout(2500)
   return files.length
 }
 
