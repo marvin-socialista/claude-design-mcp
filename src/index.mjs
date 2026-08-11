@@ -10,6 +10,9 @@ import {
   listProjects, getProjectData, listFiles, filePaths, getFile,
   chatsOf, pickChat, submitPrompt, waitForReply, closeSession,
   ensureProjectOpen, switchChat, openScreen, setWindowVisible,
+  screenshotScreen, searchFiles, isTextual, listTemplates, createProject,
+  createProjectRpc, setProjectDesignSystems, writeFiles, stripInjected,
+  DESIGN_SYSTEM, PLAIN_PROJECT,
 } from './session.mjs'
 
 const NOISE_KINDS = new Set(['summary-placeholder', 'question-record'])
@@ -43,14 +46,132 @@ server.registerTool(
   'list_projects',
   {
     title: 'List Claude Design projects',
-    description: 'List every claude.ai/design project you can open, with its projectId. Start here to pick the right project.',
+    description: 'List every claude.ai/design project you can open, with its projectId and whether it is a design system. Start here to pick the right project.',
+    inputSchema: {
+      kind: z.enum(['all', 'projects', 'design_systems']).default('all').describe('Filter by project type'),
+    },
+  },
+  async ({ kind }) => {
+    let items = await listProjects()
+    if (kind === 'projects') items = items.filter((p) => p.type === PLAIN_PROJECT)
+    if (kind === 'design_systems') items = items.filter((p) => p.type === DESIGN_SYSTEM)
+    if (!items.length) return text('No projects found.')
+    const rows = items.map((p) =>
+      `- ${p.name}${p.type === DESIGN_SYSTEM ? '  [design system]' : ''}\n  id: ${p.projectId}\n  last viewed: ${p.viewedAt || 'unknown'}`)
+    return text(`${items.length} project(s):\n\n${rows.join('\n')}`)
+  }
+)
+
+server.registerTool(
+  'list_templates',
+  {
+    title: 'List project templates',
+    description: 'The template tiles on the Claude Design home screen (Blank, Mobile app design, Slides, Wireframe, Diagram and the rest). Use before create_project to pick one by name.',
     inputSchema: {},
   },
   async () => {
-    const items = await listProjects()
-    if (!items.length) return text('No projects found.')
-    const rows = items.map((p) => `- ${p.name}\n  id: ${p.projectId}\n  last viewed: ${p.viewedAt || 'unknown'}`)
-    return text(`${items.length} project(s):\n\n${rows.join('\n')}`)
+    const t = await listTemplates()
+    if (!t.length) return text('No template tiles found on the home screen.')
+    return text(t.map((x) => `- ${x.label}${x.selected ? '  [default]' : ''}`).join('\n'))
+  }
+)
+
+server.registerTool(
+  'create_project',
+  {
+    title: 'Create a new Claude Design project',
+    description:
+      'Start a brand new project from the home screen: pick a template, describe what to create, and it begins building. ' +
+      'Returns the new projectId. Claude Design names the project from your prompt. ' +
+      'Attach local images (screenshots, references) with `attachments` to design from them.',
+    inputSchema: {
+      prompt: z.string().min(1).describe('What to create. This is the "What should we create?" box.'),
+      template: z.string().optional().describe('Template name or fragment, e.g. "Mobile app" or "Slides". Omit for Blank.'),
+      attachments: z.array(z.string()).optional().describe('Local file paths to attach, e.g. screenshots from this repo'),
+      visible: z.boolean().default(true).describe('Show the window so the user can watch'),
+      wait: z.boolean().default(true).describe('Wait for the first build to finish'),
+      idleSeconds: z.number().int().min(2).max(300).default(20),
+      timeoutSeconds: z.number().int().min(30).max(3600).default(1500),
+      maxChars: z.number().int().min(200).max(50000).default(4000),
+    },
+  },
+  async ({ prompt, template, attachments, visible, wait, idleSeconds, timeoutSeconds, maxChars }) => {
+    const { projectId, template: picked, before } = await createProject(prompt, { template, visible, attachments })
+    const head = `Created project ${projectId}${picked ? ` from template "${picked}"` : ''}.\n`
+
+    if (!wait) return text(`${head}Not waiting. Use read_chat to follow along.`)
+
+    const r = await waitForReply({
+      projectId,
+      sinceCount: 0,
+      before,
+      idleMs: idleSeconds * 1000,
+      timeoutMs: timeoutSeconds * 1000,
+    })
+    const replied = r.fresh.some((m) => m.role === 'assistant' && String(m.content ?? '').trim())
+    return text(
+      `${head}Project name: "${r.data?.name}"\n${r.streams} model turn(s)\n` +
+      (r.timedOut && !replied ? 'TIMED OUT: still building. Do not close the browser; check read_chat.\n' : '') +
+      `\n${renderMessages(r.fresh, { maxChars, includeAll: false })}`
+    )
+  }
+)
+
+server.registerTool(
+  'create_design_system',
+  {
+    title: 'Create a design system',
+    description:
+      'Create an empty design-system project. A project type is fixed at creation and cannot be changed later, ' +
+      'so a design system has to be made as one from the start. Push components into it with write_files, ' +
+      'then attach it to projects with link_design_systems so their chats design against it.',
+    inputSchema: { name: z.string().min(1).describe('Name for the design system') },
+  },
+  async ({ name }) => {
+    const r = await createProjectRpc(name, { type: DESIGN_SYSTEM })
+    return text(`Created design system "${r.name}"\nid: ${r.projectId}`)
+  }
+)
+
+server.registerTool(
+  'link_design_systems',
+  {
+    title: 'Attach design systems to a project',
+    description:
+      'Set which design systems a project designs against. Replaces the current set, so pass every one you want kept. ' +
+      'Pass an empty list to detach all.',
+    inputSchema: {
+      projectId: z.string(),
+      designSystemIds: z.array(z.string()).describe('Project ids of design systems. Empty array detaches all.'),
+    },
+  },
+  async ({ projectId, designSystemIds }) => {
+    await setProjectDesignSystems(projectId, designSystemIds)
+    return text(designSystemIds.length
+      ? `Attached ${designSystemIds.length} design system(s) to ${projectId}.`
+      : `Detached all design systems from ${projectId}.`)
+  }
+)
+
+server.registerTool(
+  'write_files',
+  {
+    title: 'Write files into a project',
+    description:
+      'Write or overwrite files in a Claude Design project or design system. ' +
+      'Use to push components, tokens or assets up from the repo. Overwrites without asking, so read first if unsure.',
+    inputSchema: {
+      projectId: z.string(),
+      files: z.array(z.object({
+        path: z.string().describe('Project-relative path'),
+        content: z.string().describe('File contents'),
+        encoding: z.enum(['utf8', 'base64']).default('utf8'),
+      })).min(1).max(50),
+    },
+  },
+  async ({ projectId, files }) => {
+    await writeFiles(projectId, files)
+    return text(`Wrote ${files.length} file(s) to ${projectId}:\n${files.map((f) => f.path).join('\n')}`)
   }
 )
 
@@ -114,6 +235,7 @@ server.registerTool(
       projectId: z.string().describe('Project UUID from list_projects'),
       prompt: z.string().min(1).describe('What Claude Design should do'),
       chatId: z.string().optional().describe('Chat to post into. Defaults to whichever is already active.'),
+      attachments: z.array(z.string()).optional().describe('Local file paths to attach, e.g. a screenshot from this repo to design from or compare against'),
       visible: z.boolean().default(true).describe('Show the browser window so the user can watch it work'),
       wait: z.boolean().default(true).describe('Wait for it to finish. false returns as soon as the prompt is sent.'),
       idleSeconds: z.number().int().min(2).max(300).default(15).describe('Network-quiet period before checking for a reply. Raise it for jobs with long tool calls.'),
@@ -121,7 +243,7 @@ server.registerTool(
       maxChars: z.number().int().min(200).max(50000).default(6000).describe('Per-message clip length'),
     },
   },
-  async ({ projectId, prompt, chatId, visible, wait, idleSeconds, timeoutSeconds, maxChars }) => {
+  async ({ projectId, prompt, chatId, attachments, visible, wait, idleSeconds, timeoutSeconds, maxChars }) => {
     // Aim at the right chat before measuring, so the transcript diff is taken
     // against the thread the reply will actually land in.
     await ensureProjectOpen(projectId, { chatId, visible })
@@ -131,7 +253,7 @@ server.registerTool(
     const preCount = preChat ? (preChat.messages || []).length : 0
     const preFiles = new Set(filePaths(await listFiles(projectId)))
 
-    const { before } = await submitPrompt(projectId, prompt, { chatId, visible })
+    const { before } = await submitPrompt(projectId, prompt, { chatId, visible, attachments })
 
     if (!wait) {
       return text(`Sent to project ${projectId}. Not waiting.\nUse read_chat to see the reply once it lands.`)
@@ -210,6 +332,50 @@ server.registerTool(
 )
 
 server.registerTool(
+  'screenshot',
+  {
+    title: 'See the design',
+    description:
+      "Capture what a page in a Claude Design project actually looks like and return it as an image, so you can judge the work rather than taking the designer's word for it. " +
+      "Use it after send_prompt to check the result, before sending a revision so your critique is specific, and whenever the user asks whether something looks right. " +
+      "Captures the rendered design out of the viewer, without the app's own UI around it.",
+    inputSchema: {
+      projectId: z.string(),
+      path: z.string().optional().describe('Page to capture, e.g. Components.dc.html. Omit for whatever is open.'),
+      chatId: z.string().optional(),
+      fullPage: z.boolean().default(false).describe('Capture the whole document instead of the visible area. Can be very tall.'),
+      visible: z.boolean().default(true).describe('Show the window while capturing'),
+      format: z.enum(['jpeg', 'png']).default('jpeg').describe('png for crisp type, jpeg for a smaller image'),
+      quality: z.number().int().min(30).max(100).default(85).describe('jpeg only'),
+      width: z.number().int().min(320).max(3000).optional().describe('Viewport width, e.g. 402 for an iPhone-class frame'),
+      height: z.number().int().min(320).max(3000).optional(),
+      savePath: z.string().optional().describe('Also write the image here. Use for full-page captures instead of returning them inline.'),
+    },
+  },
+  async ({ projectId, path, chatId, fullPage, visible, format, quality, width, height, savePath }) => {
+    const { buf, target } = await screenshotScreen(projectId, {
+      path, chatId, fullPage, visible, format, quality, width, height,
+    })
+
+    const note = `Captured ${target}${path ? ` of ${path}` : ''} (${format}, ${Math.round(buf.length / 1024)} KB)`
+
+    if (savePath) {
+      const out = resolve(savePath)
+      await mkdir(dirname(out), { recursive: true })
+      await writeFile(out, buf)
+      return text(`${note}\nSaved to ${out}`)
+    }
+
+    return {
+      content: [
+        { type: 'text', text: note },
+        { type: 'image', data: buf.toString('base64'), mimeType: format === 'png' ? 'image/png' : 'image/jpeg' },
+      ],
+    }
+  }
+)
+
+server.registerTool(
   'switch_chat',
   {
     title: 'Switch the active chat',
@@ -245,18 +411,64 @@ server.registerTool(
 server.registerTool(
   'read_file',
   {
-    title: 'Read a project file',
-    description: 'Read one text file out of a Claude Design project.',
+    title: 'Read the built code',
+    description:
+      'Read a file straight out of a Claude Design project, no download needed. ' +
+      'A .dc.html page runs to hundreds of KB, so use offset/limit to read a slice, ' +
+      'and search_code first to find the line you want.',
     inputSchema: {
       projectId: z.string(),
       path: z.string().describe('Project-relative path, e.g. Prototype.dc.html'),
+      offset: z.number().int().min(0).default(0).describe('First line to return, 0-based'),
+      limit: z.number().int().min(1).max(5000).optional().describe('How many lines. Omit for the whole file, subject to maxChars.'),
       maxChars: z.number().int().min(500).max(400000).default(60000),
+      raw: z.boolean().default(false).describe("Keep Claude Design's injected preview runtime instead of stripping it"),
     },
   },
-  async ({ projectId, path, maxChars }) => {
+  async ({ projectId, path, offset, limit, maxChars, raw }) => {
     const buf = await getFile(projectId, path)
     if (buf.includes(0)) return text(`${path} looks binary (${buf.length} bytes). Use pull_files to save it to disk.`)
-    return text(clip(buf.toString('utf8'), maxChars))
+
+    const src = buf.toString('utf8')
+    const body = raw ? src : stripInjected(src)
+    const lines = body.split('\n')
+    const slice = lines.slice(offset, limit ? offset + limit : undefined)
+    const head = `${path}: ${lines.length} lines, showing ${offset + 1}-${offset + slice.length}\n\n`
+    return text(head + clip(slice.join('\n'), maxChars))
+  }
+)
+
+server.registerTool(
+  'search_code',
+  {
+    title: 'Search the built code',
+    description:
+      "Grep the project's own files for a regex and get back matches with line numbers and context. " +
+      'This is how you find what Claude Design actually built without downloading anything: ' +
+      'locate the markup or token, then read_file that region.',
+    inputSchema: {
+      projectId: z.string(),
+      pattern: z.string().describe('JavaScript regex source, e.g. shelf-builder|line-tab-feed'),
+      flags: z.string().default('i').describe('Regex flags'),
+      prefix: z.string().optional().describe('Only search paths starting with this'),
+      contextLines: z.number().int().min(0).max(10).default(2),
+      maxMatches: z.number().int().min(1).max(200).default(40),
+    },
+  },
+  async ({ projectId, pattern, flags, prefix, contextLines, maxMatches }) => {
+    const paths = filePaths(await listFiles(projectId))
+      .filter(isTextual)
+      .filter((p) => !prefix || p.startsWith(prefix))
+    if (!paths.length) return text('No text files matched that prefix.')
+
+    const r = await searchFiles(projectId, paths, { pattern, flags, contextLines, maxMatches })
+    if (r.error) return text(r.error)
+    if (!r.matches.length) return text(`No matches for /${pattern}/${flags} across ${paths.length} file(s).`)
+
+    const body = r.matches.map((m) => `--- ${m.path}:${m.line}\n${m.text}`).join('\n\n')
+    return text(
+      `${r.matches.length} match(es) across ${r.scanned} file(s)${r.truncated ? ', truncated' : ''}\n\n${body}`
+    )
   }
 )
 

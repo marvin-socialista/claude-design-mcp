@@ -242,6 +242,238 @@ export async function getFile (projectId, path) {
   return b64(r.content || '')
 }
 
+/**
+ * Drop Claude Design's own runtime preamble.
+ *
+ * HTML can come back with a `data-omelette-injected` style and script pair
+ * bolted to the front: the preview harness (storage shim, console bridge, Babel
+ * plugins) and about 15 KB of minified noise that is not the author's content.
+ * The attribute is unambiguous, so removing those two tags is safe.
+ */
+export function stripInjected (src) {
+  return src.replace(/<(style|script)\b[^>]*\bdata-omelette-injected\b[^>]*>[\s\S]*?<\/\1>\s*/gi, '')
+}
+
+/**
+ * Capture what the design actually looks like.
+ *
+ * The rendered design lives inside the viewer iframe, so shooting that element
+ * gives the artwork without the app's own chrome around it. `fullPage` reaches
+ * into the frame and shoots its body instead, which captures the whole document
+ * rather than the visible box, and can be very tall.
+ */
+export async function screenshotScreen (projectId, {
+  path, chatId, fullPage = false, visible = true, format = 'jpeg', quality = 85, width, height,
+} = {}) {
+  const p = await ensureProjectOpen(projectId, { chatId, visible })
+  if (path) await openScreen(projectId, path, { visible })
+  if (width && height) await p.setViewportSize({ width, height }).catch(() => {})
+
+  await p.locator(SEL.viewer).first().waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
+  await p.waitForTimeout(1200) // let fonts settle before capturing type
+
+  const opts = format === 'png' ? { type: 'png' } : { type: 'jpeg', quality }
+
+  if (fullPage) {
+    const body = p.frameLocator(SEL.viewer).locator('body').first()
+    if (await body.count().catch(() => 0)) return { buf: await body.screenshot(opts), target: 'frame body' }
+  }
+
+  const el = p.locator(SEL.viewer).first()
+  if (await el.count().catch(() => 0)) return { buf: await el.screenshot(opts), target: 'viewer' }
+
+  return { buf: await p.screenshot({ ...opts, fullPage }), target: 'whole page' }
+}
+
+const TEXTUAL = /\.(html?|css|js|jsx|ts|tsx|mjs|cjs|json|md|txt|svg|xml|yml|yaml)$/i
+export const isTextual = (p) => TEXTUAL.test(p)
+
+/**
+ * Grep the project's own files without downloading them.
+ *
+ * The whole search runs inside the page in one round trip: a `.dc.html` runs to
+ * hundreds of KB, and pulling 190 files over one RPC each (each a separate
+ * page.evaluate, which serialises) would be far slower than letting the browser
+ * fetch them in parallel and match there.
+ */
+export async function searchFiles (projectId, paths, { pattern, flags = 'i', contextLines = 2, maxMatches = 60 }) {
+  const p = await getPage()
+  return p.evaluate(
+    async ([base, pid, list, src, fl, ctx, cap]) => {
+      let re
+      try {
+        re = new RegExp(src, fl.includes('g') ? fl : fl + 'g')
+      } catch (e) {
+        return { error: `bad regex: ${e.message}` }
+      }
+      const out = []
+      let scanned = 0
+      let truncated = false
+
+      const fetchOne = async (path) => {
+        const r = await fetch(base + 'GetFile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: pid, path }),
+        })
+        if (!r.ok) return null
+        const j = await r.json()
+        try {
+          return new TextDecoder().decode(Uint8Array.from(atob(j.content || ''), (c) => c.charCodeAt(0)))
+        } catch {
+          return null
+        }
+      }
+
+      // Modest pool: enough to overlap latency, not enough to trip rate limits.
+      const queue = [...list]
+      const worker = async () => {
+        for (;;) {
+          const path = queue.shift()
+          if (path === undefined || out.length >= cap) return
+          const body = await fetchOne(path).catch(() => null)
+          if (body === null) continue
+          scanned++
+          const lines = body.split('\n')
+          for (let i = 0; i < lines.length; i++) {
+            re.lastIndex = 0
+            if (!re.test(lines[i])) continue
+            out.push({
+              path,
+              line: i + 1,
+              text: lines.slice(Math.max(0, i - ctx), i + ctx + 1).join('\n').slice(0, 1200),
+            })
+            if (out.length >= cap) { truncated = true; return }
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: 6 }, worker))
+      return { matches: out, scanned, truncated }
+    },
+    [RPC_BASE, projectId, paths, pattern, flags, contextLines, maxMatches]
+  )
+}
+
+async function goHome (visible) {
+  const p = await getPage()
+  if (visible !== undefined) await setWindowVisible(visible)
+  if (!/^\/design\/?$/.test(new URL(p.url()).pathname)) {
+    await p.goto(`${ORIGIN}/design`, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  }
+  await p.locator(SEL.homeComposer).first().waitFor({ state: 'visible', timeout: 60000 })
+  return p
+}
+
+/**
+ * Create a design system, or a plain project, straight over the RPC.
+ *
+ * Unlike createProject() this makes an empty one with no first prompt, which is
+ * what you want for a design system: you then push components into it. The type
+ * is fixed at creation and cannot be changed afterwards.
+ */
+export async function createProjectRpc (name, { type = DESIGN_SYSTEM } = {}) {
+  const r = await rpc('CreateProject', { name, type })
+  if (!r?.projectId) throw new Error(`CreateProject returned no projectId: ${JSON.stringify(r).slice(0, 300)}`)
+  return { projectId: r.projectId, name, type }
+}
+
+/** Attach design systems to a project, so its chats design against them. */
+export async function setProjectDesignSystems (projectId, dsProjectIds) {
+  await rpc('UpdateProjectDesignSystems', {
+    projectId,
+    designSystems: dsProjectIds.map((dsProjectId) => ({ dsProjectId, syncedAtVersion: '0' })),
+  })
+  return { projectId, designSystems: dsProjectIds }
+}
+
+/**
+ * Write files into a project, e.g. components into a design system.
+ *
+ * The request is `mutations`, each carrying a `write` oneof, not a plain
+ * `files` list. Getting that wrong is silent: the server returns 200, ignores
+ * the unknown field, and the file ends up empty. So the write is verified by
+ * reading back what landed.
+ */
+export async function writeFiles (projectId, files) {
+  const resp = await rpc('WriteFiles', {
+    projectId,
+    mutations: files.map((f) => ({
+      path: f.path,
+      // `data` is a plain string, not proto bytes: text goes up as-is and only
+      // binary is base64, flagged by `encoding`. Base64-encoding text stores
+      // the base64 itself as the file contents.
+      write: {
+        data: f.content,
+        encoding: f.encoding === 'base64' ? 'base64' : '',
+      },
+    })),
+  })
+
+  const written = []
+  const empty = []
+  for (const f of files) {
+    const back = stripInjected((await getFile(projectId, f.path)).toString('utf8'))
+    ;(back.trim() ? written : empty).push(f.path)
+  }
+  if (empty.length) throw new Error(`WriteFiles reported success but these came back empty: ${empty.join(', ')}`)
+  return { resp, written }
+}
+
+/** The template tiles on the "What should we create?" screen. */
+export async function listTemplates () {
+  const p = await goHome()
+  const tiles = p.locator(SEL.templateTile)
+  await tiles.first().waitFor({ state: 'attached', timeout: 30000 }).catch(() => {})
+  return p.evaluate(
+    (sel) => [...document.querySelectorAll(sel)].map((b) => ({
+      label: (b.getAttribute('aria-label') || b.innerText || '').replace(/\s+/g, ' ').trim(),
+      selected: b.getAttribute('aria-pressed') === 'true',
+    })),
+    SEL.templateTile
+  )
+}
+
+/**
+ * Start a new project the way a person does: pick a template on the home
+ * screen, describe what you want, send.
+ *
+ * The RPC (`CreateProject`) takes `{name, skills, type, designSystems}` where a
+ * template is a "skills" payload, so calling it directly would mean hardcoding
+ * each template's prompt and introductory message. Clicking the tile keeps
+ * whatever the app currently ships, and starts the first generation in one go.
+ * The project is named by Claude Design from the prompt.
+ */
+export async function createProject (prompt, { template, visible = true, attachments } = {}) {
+  const p = await goHome(visible)
+
+  let picked = null
+  if (template) {
+    const esc = template.replace(/["\\]/g, '\\$&')
+    const tile = p.locator(`${SEL.templateTile}[aria-label*="${esc}" i]`).first()
+    if (!(await tile.count().catch(() => 0))) {
+      const all = await listTemplates()
+      throw new Error(`No template matching "${template}". Available: ${all.map((t) => t.label).join(' | ')}`)
+    }
+    picked = await tile.getAttribute('aria-label')
+    await tile.click({ timeout: 15000 })
+    await p.waitForTimeout(500)
+  }
+
+  await p.locator(SEL.homeComposer).first().click()
+  if (attachments?.length) await attachFiles(p, attachments)
+  await p.keyboard.insertText(prompt)
+
+  const before = await chatStreamCount()
+  const send = p.locator(SEL.homeSend).first()
+  if (!(await send.click({ timeout: 8000 }).then(() => true).catch(() => false))) {
+    await p.keyboard.press('Enter')
+  }
+
+  await p.waitForURL(PROJECT_URL, { timeout: 180000 })
+  const projectId = p.url().match(PROJECT_URL)[1]
+  return { projectId, template: picked, before }
+}
+
 /** Chats newest-activity first, with the transcript attached. */
 export function chatsOf (data) {
   const chats = Object.values(data.chats || {})
@@ -270,7 +502,17 @@ const SEL = {
   menuRow: 'button.om-menu-item-btn',
   viewer: '[data-testid="html-viewer-iframe"]',
   title: '[data-testid="project-title"]',
+  templateTile: '.om-grid button.om-grid-tile',
+  // The home screen has its own composer, not the project one.
+  homeComposer: '[data-testid="home-composer-input"]',
+  homeSend: '[data-testid="home-composer-send"]',
+  dsPicker: '[data-testid="composer-ds-picker-trigger"]',
 }
+
+export const DESIGN_SYSTEM = 'PROJECT_TYPE_DESIGN_SYSTEM'
+export const PLAIN_PROJECT = 'PROJECT_TYPE_PROJECT'
+
+const PROJECT_URL = /\/design\/p\/([0-9a-f-]{36})/i
 
 /** "Prototype.dc.html" is listed in the page switcher as just "Prototype". */
 const pageLabel = (path) => path.split('/').pop().replace(/\.dc\.html$/i, '')
@@ -398,11 +640,37 @@ export async function openScreen (projectId, path, { visible = true } = {}) {
  * Type a prompt into the composer and send it.
  * Returns once the message is accepted, not once the answer is finished.
  */
-export async function submitPrompt (projectId, prompt, { chatId, visible } = {}) {
+/**
+ * Attach local files (screenshots, references) to the composer.
+ *
+ * Prefers the hidden file input, which needs no menu navigation. Falls back to
+ * driving the import button through a native file chooser.
+ */
+export async function attachFiles (p, files) {
+  if (!files?.length) return null
+
+  const input = p.locator('input[type="file"]').first()
+  if (await input.count().catch(() => 0)) {
+    await input.setInputFiles(files)
+  } else {
+    const [chooser] = await Promise.all([
+      p.waitForEvent('filechooser', { timeout: 15000 }),
+      p.locator('[data-testid="composer-import-button"]').first().click({ timeout: 15000 }),
+    ])
+    await chooser.setFiles(files)
+  }
+
+  // Uploads must finish before the send button will take them.
+  await p.waitForTimeout(1500)
+  return files.length
+}
+
+export async function submitPrompt (projectId, prompt, { chatId, visible, attachments } = {}) {
   const p = await ensureProjectOpen(projectId, { chatId, visible })
   const box = p.locator(SEL.composer).first()
 
   await box.click()
+  if (attachments?.length) await attachFiles(p, attachments)
   await p.keyboard.insertText(prompt)
 
   const before = await chatStreamCount()

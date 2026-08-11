@@ -55,21 +55,56 @@ claude mcp add claude-design --scope user -- node "$PWD/src/index.mjs"
 
 ## Tools
 
+**Start something**
+
 | Tool | What it does |
 | --- | --- |
-| `list_projects` | Every project you can open, with its `projectId` |
+| `list_templates` | The home-screen tiles: Blank, Mobile app design, Slides, Wireframe, Diagram and 9 more |
+| `create_project` | The "What should we create?" box: a prompt, an optional template, and it starts building |
+| `create_design_system` | An empty design-system project. Type is fixed at creation, so it cannot be converted later |
+| `link_design_systems` | Attach design systems to a project so its chats design against them |
+
+**Talk to it**
+
+| Tool | What it does |
+| --- | --- |
+| `list_projects` | Every project, with its `projectId` and whether it is a design system |
 | `list_chats` | Chat threads in a project, marking the active one |
-| `read_chat` | Tail of a transcript. How you read what Claude Design said |
-| `send_prompt` | Send an instruction, wait for the answer, return the reply and what changed |
-| `open_screen` | Put the window on your display, on a given project, chat and page |
 | `switch_chat` | Make a different thread active, since `send_prompt` posts into the active one |
+| `send_prompt` | Send an instruction, wait for the answer, return the reply and what changed. Takes local `attachments` |
+| `read_chat` | Tail of a transcript. How you read what Claude Design said |
+
+**See and read what it built**
+
+| Tool | What it does |
+| --- | --- |
+| `screenshot` | The rendered page as an image, so Claude can actually judge the design |
+| `open_screen` | Put the window on your display, on a given project, chat and page |
+| `search_code` | Grep the project's files, with line numbers and context |
+| `read_file` | Read a file, or a line range of one, without downloading it |
 | `list_files` | Recursive file listing |
-| `read_file` | Read one text file |
+
+**Move work around**
+
+| Tool | What it does |
+| --- | --- |
 | `pull_files` | Download files to a local directory, binaries included |
+| `write_files` | Push files up, e.g. components into a design system |
 | `close_browser` | Shut the background Chrome and flush its profile |
 
 The plugin also ships a `claude-design` skill that teaches Claude when and how
 to reach for these, so you can just say what you want.
+
+### Seeing the work, not just hearing about it
+
+`screenshot` returns the rendered page as an image, so Claude Code can judge
+layout, spacing, type and colour instead of trusting the reply text. Use
+`width: 402` for an iPhone-class frame, `format: "png"` to read fine type, and
+`fullPage: true` with `savePath` for a long document.
+
+`search_code` plus `read_file` covers the other half: read the markup Claude
+Design actually wrote, without pulling anything to disk. A `.dc.html` page runs
+to hundreds of KB, so grep first, then read the region.
 
 ### Watching it work
 
@@ -163,6 +198,13 @@ with a valid session and stealth evasions loaded. Verified both ways, headless
   **added and removed** accurately but cannot see an in-place edit. The reply
   text is what tells you those.
 - The page switcher lists pages, not every file. Use `pull_files` for the rest.
+- HTML comes back with Claude Design's own preview runtime bolted to the front,
+  a `data-omelette-injected` style and script pair worth about 15 KB.
+  `read_file` strips it; pass `raw: true` to keep it.
+- `WriteFiles` takes `mutations` with a `write` oneof, and its `data` is a plain
+  string, not proto bytes. Both mistakes fail **silently**, returning 200 while
+  storing an empty file or the literal base64. `write_files` therefore reads
+  back what it wrote and raises if nothing landed.
 
 ## Support
 
