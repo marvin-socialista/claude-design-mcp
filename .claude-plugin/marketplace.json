@@ -1,0 +1,20 @@
+{
+  "name": "claude-design",
+  "metadata": {
+    "description": "Drive claude.ai/design from Claude Code: send instructions, read replies, pull designs, show screens."
+  },
+  "owner": {
+    "name": "Marvin Visser"
+  },
+  "plugins": [
+    {
+      "name": "claude-design",
+      "description": "Two-way bridge to claude.ai/design. Send it design instructions, read its replies, pull the files it produces, and put the right screen on the user's display so they can watch it work.",
+      "author": {
+        "name": "Marvin Visser"
+      },
+      "source": "./",
+      "category": "design"
+    }
+  ]
+}

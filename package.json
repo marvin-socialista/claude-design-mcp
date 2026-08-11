@@ -1,0 +1,20 @@
+{
+  "name": "claude-design-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Talk to claude.ai/design from Claude Code: pick a project, send it instructions, read its replies, pull its files.",
+  "bin": {
+    "claude-design-mcp": "src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "login": "node src/login.mjs",
+    "smoke": "node src/smoke.mjs",
+    "seed": "node src/seed.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "zod": "^3.25.0"
+  }
+}

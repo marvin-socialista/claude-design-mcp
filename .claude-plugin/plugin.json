@@ -1,0 +1,17 @@
+{
+  "name": "claude-design",
+  "description": "Two-way bridge to claude.ai/design. Send it design instructions, read its replies, pull the files it produces, and put the right screen on the user's display so they can watch it work.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Marvin Visser"
+  },
+  "keywords": [
+    "design",
+    "claude-design",
+    "ui",
+    "prototype",
+    "handoff",
+    "mcp"
+  ],
+  "license": "MIT"
+}
