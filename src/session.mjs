@@ -693,6 +693,100 @@ export async function attachFiles (p, files) {
   return files.length
 }
 
+/** Open the composer's import menu and click one of its rows. */
+async function openImportItem (p, label) {
+  await p.keyboard.press('Escape').catch(() => {})
+  await p.waitForTimeout(300)
+  await p.locator(SEL.importButton).first().click({ timeout: 15000 })
+  const row = p
+    .locator('[role="menu"] button:visible, .om-menu-item-btn:visible')
+    .filter({ hasText: new RegExp(label, 'i') })
+    .first()
+  await row.waitFor({ state: 'visible', timeout: 15000 })
+  await row.click({ timeout: 10000 })
+  await p.waitForTimeout(1500)
+}
+
+/**
+ * Point a project at a GitHub repository, so designs start from real code.
+ *
+ * The connector is already authorised at the account level (the dialog shows
+ * "Connected as ..."), so this only picks a repo. It does not grant access, and
+ * it will not try to: if GitHub is not connected, it says so and stops.
+ */
+export async function chooseRepository (projectId, repo, { visible = true } = {}) {
+  const p = await ensureProjectOpen(projectId, { visible })
+  await openImportItem(p, 'Choose a repository')
+
+  const dlg = p.locator('[role="dialog"]').last()
+  await dlg.waitFor({ state: 'visible', timeout: 15000 })
+
+  const body = await dlg.innerText().catch(() => '')
+  if (!/connected as/i.test(body)) {
+    await p.keyboard.press('Escape').catch(() => {})
+    throw new Error('GitHub does not look connected. Connect it once in the browser; this tool will not drive an OAuth grant.')
+  }
+
+  // The search box carries no `type` attribute, so `input[type="text"]` misses
+  // it even though the DOM property reports "text". Match the placeholder.
+  const search = dlg.locator('input[placeholder*="epositor" i]').first()
+  await search.fill(repo, { timeout: 15000 })
+  await p.waitForTimeout(2000)
+
+  // This is a Base UI radio group: the real control is a <span role="radio">
+  // and the <input type="radio"> beside it is an aria-hidden proxy that never
+  // becomes checked. The input is a *sibling*, not an ancestor, so clicking it
+  // or its closest() parent silently does nothing. Drive the span.
+  const row = dlg.locator('[role="radio"]').filter({ hasText: repo }).first()
+  if (!(await row.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false))) {
+    const available = await dlg
+      .locator('input[type="radio"]')
+      .evaluateAll((els) => els.map((e) => e.value))
+      .catch(() => [])
+    await p.keyboard.press('Escape').catch(() => {})
+    throw new Error(`No repository matched "${repo}". Visible: ${available.slice(0, 15).join(', ') || 'none'}`)
+  }
+
+  // Name comes from the proxy input's value ("owner/repo"); the span's own text
+  // starts with an icon node and reads blank.
+  const chosen = await dlg
+    .locator('input[type="radio"]')
+    .evaluateAll((els, want) => {
+      const hit = els.find((e) => (e.value || '').toLowerCase().includes(want.toLowerCase()))
+      return hit ? hit.value : want
+    }, repo)
+  await row.click({ timeout: 10000 })
+
+  if ((await row.getAttribute('aria-checked')) !== 'true') {
+    await row.press('Space').catch(() => {}) // radio groups take the spacebar
+    await p.waitForTimeout(600)
+    if ((await row.getAttribute('aria-checked')) !== 'true') {
+      await p.keyboard.press('Escape').catch(() => {})
+      throw new Error(`Clicked "${chosen}" but the row did not select.`)
+    }
+  }
+  await p.waitForTimeout(600)
+
+  await dlg.getByRole('button', { name: /continue/i }).first().click({ timeout: 10000 })
+  await p.waitForTimeout(2500)
+  return { repo: chosen }
+}
+
+/** Push a .fig file in through the import menu. */
+export async function uploadFig (projectId, file, { visible = true } = {}) {
+  const p = await ensureProjectOpen(projectId, { visible })
+  const chooserPromise = p.waitForEvent('filechooser', { timeout: 20000 })
+  await openImportItem(p, 'Upload .fig')
+  const chooser = await chooserPromise.catch(() => null)
+  if (!chooser) {
+    await p.keyboard.press('Escape').catch(() => {})
+    throw new Error('"Upload .fig file" did not open a file chooser. It may be a documentation link rather than an upload in this build.')
+  }
+  await chooser.setFiles([file])
+  await p.waitForTimeout(3000)
+  return { uploaded: file }
+}
+
 export async function submitPrompt (projectId, prompt, { chatId, visible, attachments } = {}) {
   const p = await ensureProjectOpen(projectId, { chatId, visible })
   const box = p.locator(SEL.composer).first()

@@ -12,6 +12,7 @@ import {
   ensureProjectOpen, switchChat, openScreen, setWindowVisible,
   screenshotScreen, searchFiles, isTextual, listTemplates, createProject,
   createProjectRpc, setProjectDesignSystems, writeFiles, stripInjected,
+  chooseRepository, uploadFig,
   DESIGN_SYSTEM, PLAIN_PROJECT,
 } from './session.mjs'
 
@@ -156,6 +157,42 @@ server.registerTool(
 )
 
 server.registerTool(
+  'choose_repository',
+  {
+    title: 'Design against a GitHub repository',
+    description:
+      'Point a project at one of the connected GitHub repositories, so new designs start from the product that already exists. ' +
+      'Requires GitHub to be connected on the account already; this will not perform an OAuth grant.',
+    inputSchema: {
+      projectId: z.string(),
+      repo: z.string().describe('Repository name or fragment, e.g. claude-design-mcp'),
+      visible: z.boolean().default(true),
+    },
+  },
+  async ({ projectId, repo, visible }) => {
+    const r = await chooseRepository(projectId, repo, { visible })
+    return text(`${projectId} now designs against repository: ${r.repo}`)
+  }
+)
+
+server.registerTool(
+  'upload_fig',
+  {
+    title: 'Upload a .fig file',
+    description: 'Push a Figma .fig file from disk into a project through the import menu.',
+    inputSchema: {
+      projectId: z.string(),
+      path: z.string().describe('Local path to the .fig file'),
+      visible: z.boolean().default(true),
+    },
+  },
+  async ({ projectId, path, visible }) => {
+    const r = await uploadFig(projectId, path, { visible })
+    return text(`Uploaded ${r.uploaded}`)
+  }
+)
+
+server.registerTool(
   'write_files',
   {
     title: 'Write files into a project',
@@ -238,6 +275,7 @@ server.registerTool(
       prompt: z.string().min(1).describe('What Claude Design should do'),
       chatId: z.string().optional().describe('Chat to post into. Defaults to whichever is already active.'),
       attachments: z.array(z.string()).optional().describe('Local file paths to attach, e.g. a screenshot from this repo to design from or compare against'),
+      referenceProjectIds: z.array(z.string()).optional().describe('Other projects to pull context from. Their URLs are appended to the prompt, which is how Claude Design picks them up.'),
       visible: z.boolean().default(true).describe('Show the browser window so the user can watch it work'),
       wait: z.boolean().default(true).describe('Wait for it to finish. false returns as soon as the prompt is sent.'),
       idleSeconds: z.number().int().min(2).max(300).default(15).describe('Network-quiet period before checking for a reply. Raise it for jobs with long tool calls.'),
@@ -245,7 +283,12 @@ server.registerTool(
       maxChars: z.number().int().min(200).max(50000).default(6000).describe('Per-message clip length'),
     },
   },
-  async ({ projectId, prompt, chatId, attachments, visible, wait, idleSeconds, timeoutSeconds, maxChars }) => {
+  async ({ projectId, prompt, chatId, attachments, referenceProjectIds, visible, wait, idleSeconds, timeoutSeconds, maxChars }) => {
+    // "Reference another project" is not a menu action: the app's own dialog
+    // says to paste the project URL into the composer and it picks it up.
+    if (referenceProjectIds?.length) {
+      prompt += '\n\n' + referenceProjectIds.map((id) => `https://claude.ai/design/p/${id}`).join('\n')
+    }
     // Aim at the right chat before measuring, so the transcript diff is taken
     // against the thread the reply will actually land in.
     await ensureProjectOpen(projectId, { chatId, visible })
