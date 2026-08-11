@@ -116,6 +116,21 @@ added and removed, but the API exposes no version or mtime, so a rewritten
 `Prototype.dc.html` looks unchanged. The reply text and `search_code` are what
 tell you. Say so rather than claiming nothing changed.
 
+## Deleting
+
+`delete_project`, `delete_files` and `delete_chat` are permanent. There is no
+trash and no undo.
+
+**Ask the user before calling any of them**, and name exactly what will go.
+Never delete as a tidy-up step you decided on yourself, and never delete a
+project just because a task created it.
+
+`delete_project` takes `confirmName`, which must exactly match the project's
+current name from `list_projects`. This is deliberate: a UUID is easy to carry
+over from the wrong step, a name has to be looked up and matched on purpose. If
+it refuses, do not go hunting for the right string to force it through, re-read
+which project the user actually meant.
+
 ## Moving work between the repo and the project
 
 - `pull_files` downloads into a local directory, binaries included.

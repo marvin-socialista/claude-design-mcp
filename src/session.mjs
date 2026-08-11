@@ -772,6 +772,51 @@ export async function chooseRepository (projectId, repo, { visible = true } = {}
   return { repo: chosen }
 }
 
+/**
+ * Delete a project for good. There is no trash and no undo.
+ *
+ * Guarded the way GitHub guards repo deletion: the caller must pass the
+ * project's exact current name. A project id is a UUID an agent can easily
+ * carry over from the wrong step, whereas a name has to be looked up and
+ * matched deliberately.
+ */
+export async function deleteProject (projectId, confirmName) {
+  const proj = await getProject(projectId)
+  const actual = String(proj?.name ?? '')
+  if (!confirmName || confirmName.trim() !== actual.trim()) {
+    throw new Error(
+      `Refusing to delete. confirmName must exactly match the project's name.\n` +
+      `  given:  ${JSON.stringify(confirmName ?? null)}\n  actual: ${JSON.stringify(actual)}`
+    )
+  }
+
+  await rpc('DeleteProject', { projectId })
+
+  const still = (await listProjects()).some((p) => p.projectId === projectId)
+  if (still) throw new Error('DeleteProject reported success but the project is still listed.')
+  return { projectId, name: actual }
+}
+
+/** Delete files from a project. Same mutations envelope as a write, with a delete op. */
+export async function deleteFiles (projectId, paths) {
+  await rpc('WriteFiles', {
+    projectId,
+    mutations: paths.map((path) => ({ path, delete: {} })),
+  })
+  const left = filePaths(await listFiles(projectId))
+  const remaining = paths.filter((p) => left.includes(p))
+  if (remaining.length) throw new Error(`Still present after delete: ${remaining.join(', ')}`)
+  return { deleted: paths }
+}
+
+/** Delete one chat thread from a project. */
+export async function deleteChat (projectId, chatId) {
+  await rpc('DeleteChat', { projectId, chatId })
+  const data = await getProjectData(projectId)
+  if (chatsOf(data).some((c) => c.id === chatId)) throw new Error('DeleteChat reported success but the chat is still there.')
+  return { chatId }
+}
+
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'coverage', '.venv', '__pycache__'])
 
 /** Read a directory into a nested {dirs, files} tree, bounded so a big repo cannot blow up the page. */

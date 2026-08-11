@@ -12,7 +12,7 @@ import {
   ensureProjectOpen, switchChat, openScreen, setWindowVisible,
   screenshotScreen, searchFiles, isTextual, listTemplates, createProject,
   createProjectRpc, setProjectDesignSystems, writeFiles, stripInjected,
-  chooseRepository, uploadFig, linkLocalCode,
+  chooseRepository, uploadFig, linkLocalCode, deleteProject, deleteFiles, deleteChat,
   DESIGN_SYSTEM, PLAIN_PROJECT,
 } from './session.mjs'
 
@@ -579,6 +579,54 @@ server.registerTool(
       `Wrote ${written.length} file(s) to ${root}\n${written.join('\n')}` +
       (failed.length ? `\n\nFailed ${failed.length}:\n${failed.join('\n')}` : '')
     )
+  }
+)
+
+server.registerTool(
+  'delete_project',
+  {
+    title: 'Delete a project',
+    description:
+      'Permanently delete a Claude Design project or design system. There is no trash and no undo. ' +
+      'Ask the user before calling this, then pass the project\'s exact current name as confirmName: ' +
+      'the call is refused if it does not match, which is what stops the wrong project being deleted.',
+    inputSchema: {
+      projectId: z.string(),
+      confirmName: z.string().describe("The project's exact current name, from list_projects"),
+    },
+  },
+  async ({ projectId, confirmName }) => {
+    const r = await deleteProject(projectId, confirmName)
+    return text(`Deleted "${r.name}" (${r.projectId}). This cannot be undone.`)
+  }
+)
+
+server.registerTool(
+  'delete_files',
+  {
+    title: 'Delete files from a project',
+    description: 'Permanently delete files from a Claude Design project. No undo. Verifies they are gone.',
+    inputSchema: {
+      projectId: z.string(),
+      paths: z.array(z.string()).min(1).max(100).describe('Project-relative paths'),
+    },
+  },
+  async ({ projectId, paths }) => {
+    const r = await deleteFiles(projectId, paths)
+    return text(`Deleted ${r.deleted.length} file(s):\n${r.deleted.join('\n')}`)
+  }
+)
+
+server.registerTool(
+  'delete_chat',
+  {
+    title: 'Delete a chat thread',
+    description: 'Permanently delete one chat thread from a project, including its transcript. No undo.',
+    inputSchema: { projectId: z.string(), chatId: z.string() },
+  },
+  async ({ projectId, chatId }) => {
+    await deleteChat(projectId, chatId)
+    return text(`Deleted chat ${chatId}.`)
   }
 )
 

@@ -95,6 +95,19 @@ claude mcp add claude-design --scope user -- node "$PWD/src/index.mjs"
 | `write_files` | Push files up, e.g. components into a design system |
 | `close_browser` | Shut the background Chrome and flush its profile |
 
+**Delete** (permanent, no trash, no undo)
+
+| Tool | What it does |
+| --- | --- |
+| `delete_project` | Delete a project or design system. Requires `confirmName` to match its exact current name |
+| `delete_files` | Delete files from a project, verifying they are gone |
+| `delete_chat` | Delete one chat thread and its transcript |
+
+`delete_project` is guarded the way GitHub guards repo deletion. A UUID is easy
+for an agent to carry over from the wrong step; a name has to be looked up and
+matched deliberately. Verified: it refuses `"Bridge test DS"` when the project
+is actually called `"Bridge test DS (safe to delete)"`.
+
 The plugin also ships a `claude-design` skill that teaches Claude when and how
 to reach for these, so you can just say what you want.
 
